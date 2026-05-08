@@ -3,8 +3,10 @@ import numpy as np
 from physics.radon import Radon, IRadon
 
 
-class CT():
-    def __init__(self, img_width, radon_view, uniform=True, circle=False, device='cuda:0'):
+class CT:
+    def __init__(
+        self, img_width, radon_view, uniform=True, circle=False, device="cuda:0"
+    ):
         if uniform:
             theta = np.linspace(0, 180, radon_view, endpoint=False)
             theta_all = np.linspace(0, 180, 180, endpoint=False)
@@ -34,11 +36,14 @@ class CT():
         return self.radont(y)
 
 
-class CT_LA():
+class CT_LA:
     """
     Limited Angle tomography
     """
-    def __init__(self, img_width, radon_view, uniform=True, circle=False, device='cuda:0'):
+
+    def __init__(
+        self, img_width, radon_view, uniform=True, circle=False, device="cuda:0"
+    ):
         if uniform:
             theta = np.linspace(0, 180, radon_view, endpoint=False)
         else:
@@ -55,6 +60,3 @@ class CT_LA():
 
     def AT(self, y):
         return self.radont(y)
-    
-    
-

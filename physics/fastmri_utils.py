@@ -154,7 +154,7 @@ def roll(
     if len(shift) != len(dim):
         raise ValueError("len(shift) must match len(dim)")
 
-    for (s, d) in zip(shift, dim):
+    for s, d in zip(shift, dim):
         x = roll_one_dim(x, s, d)
 
     return x
@@ -207,20 +207,20 @@ def ifftshift(x: torch.Tensor, dim: Optional[List[int]] = None) -> torch.Tensor:
 
 
 def fft2(x):
-    """ FFT with shifting DC to the center of the image"""
+    """FFT with shifting DC to the center of the image"""
     return torch.fft.fftshift(torch.fft.fft2(x), dim=[-1, -2])
 
 
 def ifft2(x):
-    """ IFFT with shifting DC to the corner of the image prior to transform"""
+    """IFFT with shifting DC to the corner of the image prior to transform"""
     return torch.fft.ifft2(torch.fft.ifftshift(x, dim=[-1, -2]))
 
 
 def fft2_m(x):
-    """ FFT for multi-coil """
+    """FFT for multi-coil"""
     return torch.view_as_complex(fft2c_new(torch.view_as_real(x)))
 
 
 def ifft2_m(x):
-    """ IFFT for multi-coil """
+    """IFFT for multi-coil"""
     return torch.view_as_complex(ifft2c_new(torch.view_as_real(x)))

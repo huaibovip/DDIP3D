@@ -1,16 +1,11 @@
 import argparse
 import traceback
-import shutil
 import logging
 import yaml
 import sys
 import os
 import torch
 import numpy as np
-import torch.utils.tensorboard as tb
-
-from pathlib import Path
-from datetime import datetime
 
 from solver_ct_3d import Diffusion as Diffusion_CT
 from solver_ct_3d_diffmbir import Diffusion as Diffusion_CT_diffmbir
@@ -19,6 +14,7 @@ from solver_mri_3d import Diffusion as Diffusion_MRI
 from solver_mri_2d import Diffusion as Diffusion_MRI_2d
 
 torch.set_printoptions(sci_mode=False)
+
 
 def parse_args_and_config():
     parser = argparse.ArgumentParser(description=globals()["__doc__"])

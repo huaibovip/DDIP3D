@@ -1,42 +1,30 @@
-import os
-import logging
-import time
-import glob
-import json
-import sys
-import odl
 import functools
+import json
+import os
+import random
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import tqdm
 import torch
-import torch.nn.functional as F
-import torch.utils.data as data
+import tqdm
 
-from datasets import get_dataset
-
-import torchvision.utils as tvu
-import lpips
-
-from guided_diffusion.models import Model
-from guided_diffusion.script_util import create_model, classifier_defaults, args_to_dict
-from guided_diffusion.utils import get_alpha_schedule
-import random
-
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-from scipy.linalg import orth
-from pathlib import Path
-
-from physics.mri import MulticoilMRI, SinglecoilMRI_comp
-from time import time
-from utils import shrink, CG, clear, batchfy, _Dz, _DzT, get_mask, real_to_nchw_comp, comp_to_nchw_real, PSNR, SSIM, \
-    update_ema, apply_ema_weights, restore_original_weights
-
-# adaptation
-from lora.lora import adapt_model, LoraInjectedConv1d, LoraInjectedConv2d, LoraInjectedLinear
+from guided_diffusion.script_util import create_model
 from lora.adaptation import adapt_loss_fn
 
+# adaptation
+from lora.lora import adapt_model
+from physics.mri import MulticoilMRI, SinglecoilMRI_comp
+from utils import (
+    CG,
+    PSNR,
+    SSIM,
+    batchfy,
+    clear,
+    comp_to_nchw_real,
+    get_mask,
+    real_to_nchw_comp,
+)
 
 
 def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_timesteps):
@@ -46,8 +34,8 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
     if beta_schedule == "quad":
         betas = (
             np.linspace(
-                beta_start ** 0.5,
-                beta_end ** 0.5,
+                beta_start**0.5,
+                beta_end**0.5,
                 num_diffusion_timesteps,
                 dtype=np.float64,
             )
@@ -59,7 +47,7 @@ def get_beta_schedule(beta_schedule, *, beta_start, beta_end, num_diffusion_time
         )
     elif beta_schedule == "const":
         betas = beta_end * np.ones(num_diffusion_timesteps, dtype=np.float64)
-    elif beta_schedule == "jsd":  
+    elif beta_schedule == "jsd":
         betas = 1.0 / np.linspace(
             num_diffusion_timesteps, 1, num_diffusion_timesteps, dtype=np.float64
         )
@@ -121,18 +109,17 @@ class Diffusion(object):
         model.eval()
         # Augment with adaptation parameters
         if self.args.adaptation:
-            adapt_kwargs = {'r': int(self.args.lora_rank)}
+            adapt_kwargs = {"r": int(self.args.lora_rank)}
             adapt_model(model, adapt_kwargs=adapt_kwargs)
 
         self.adaptation = True if self.args.adaptation else False
-        print('Run DDS 3D for MRI reconstruction.',
-            f'{self.args.T_sampling} sampling steps. ',
-            f'Task: {self.args.deg}. '
-            f'Adaptation?: {self.adaptation} '
-            )
+        print(
+            "Run DDS 3D for MRI reconstruction.",
+            f"{self.args.T_sampling} sampling steps. ",
+            f"Task: {self.args.deg}. " f"Adaptation?: {self.adaptation} ",
+        )
         self.simplified_ddnm_plus(model)
-            
-            
+
     def simplified_ddnm_plus(self, model):
         args, config = self.args, self.config
         img_size = config.data.image_size
@@ -146,27 +133,32 @@ class Diffusion(object):
             vol_names = os.listdir(root)
             for vol in vol_names:
                 root_list.append((root / vol))
-            
+
         print(f"Retrieving test data: {config.data.dataset}")
-        
+
         # Iterate over all vols
         for root in root_list:
-            vol = str(root).split('/')[-1]
+            vol = str(root).split("/")[-1]
             print(f"root: {root}")
             print(f"vol: {vol}")
-        
+
             # Specify save directory for saving generated samples
-            save_root = Path(f'{self.args.save_root}/{self.config.data.dataset}/{vol}/{self.args.mask_type}_acc{self.args.acc_factor}/cg_gamma{self.args.gamma}')
-            save_root = save_root / f"adapt_{self.adaptation}_mc{self.args.num_mc}" \
-                / f"lr{self.args.lr}_{self.args.num_steps}" \
+            save_root = Path(
+                f"{self.args.save_root}/{self.config.data.dataset}/{vol}/{self.args.mask_type}_acc{self.args.acc_factor}/cg_gamma{self.args.gamma}"
+            )
+            save_root = (
+                save_root
+                / f"adapt_{self.adaptation}_mc{self.args.num_mc}"
+                / f"lr{self.args.lr}_{self.args.num_steps}"
                 / f"{self.args.start_t}_{self.args.end_t}_every{self.args.adapt_every_k}"
+            )
             save_root.mkdir(parents=True, exist_ok=True)
 
-            irl_types = ['input', 'recon', 'label', 'progress']
+            irl_types = ["input", "recon", "label", "progress"]
             for t in irl_types:
                 save_root_f = save_root / t
                 save_root_f.mkdir(parents=True, exist_ok=True)
-            
+
             batch_size = self.args.batch_size
             print("Loading all data")
             root_img = root / "slice"
@@ -187,7 +179,7 @@ class Diffusion(object):
             mps_orig = torch.cat(mps_orig, dim=0)
             print(f"Data loaded shape - img: {x_orig.shape}")
             print(f"                    mps: {mps_orig.shape}")
-            
+
             # If test run, limit the number of slices to 8
             if self.args.test_run:
                 print(f"Test run: only running 8 slices!")
@@ -197,34 +189,34 @@ class Diffusion(object):
                 x_orig = x_orig[from_idx:to_idx, ...]
                 mps_orig = mps_orig[from_idx:to_idx, ...]
                 x_orig_id = x_orig_id[from_idx:to_idx, ...]
-            
+
             img_shape = (x_orig.shape[0], config.data.channels, img_size, img_size)
-            
+
             # MRI forward operator
             mask = get_mask(
-                torch.zeros([1, 1, img_size, img_size]), 
+                torch.zeros([1, 1, img_size, img_size]),
                 img_size,
                 1,
                 type=self.args.mask_type,
-                acc_factor=self.args.acc_factor, 
+                acc_factor=self.args.acc_factor,
                 center_fraction=self.args.center_fraction,
             ).to("cuda")
             A_funcs = MulticoilMRI(mask=mask)
-            
+
             # Alias
             A = lambda z, mps: A_funcs._A(z, mps)
             AT = lambda z, mps: A_funcs._AT(z, mps)
             Ap = lambda z, mps: A_funcs._Adagger(z, mps)
-            
+
             def Acg(x, mps, gamma):
                 return x + gamma * A_funcs._AT(A_funcs._A(x, mps), mps)
-            
+
             y = torch.zeros_like(mps_orig)
             _, yc, yh, yw = y.shape
             ATy = torch.zeros_like(x_orig)
             for idx in range(x_orig.shape[0]):
-                x_idx = x_orig[idx:idx+1, ...].to(self.device)
-                mps_idx = mps_orig[idx:idx+1, ...].to(self.device)
+                x_idx = x_orig[idx : idx + 1, ...].to(self.device)
+                mps_idx = mps_orig[idx : idx + 1, ...].to(self.device)
                 y_idx = A(x_idx, mps_idx)
                 y += torch.randn_like(y) * self.args.sigma_y
                 ATy_idx = AT(y_idx, mps_idx)
@@ -232,9 +224,17 @@ class Diffusion(object):
                 ATy[idx, ...] = ATy_idx
                 input = np.abs(clear(ATy_idx))
                 label = np.abs(clear(x_idx))
-                plt.imsave(str(save_root / "input" / f"{str(idx).zfill(3)}.png"), input, cmap='gray')
-                plt.imsave(str(save_root / "label" / f"{str(idx).zfill(3)}.png"), label, cmap='gray')
-            
+                plt.imsave(
+                    str(save_root / "input" / f"{str(idx).zfill(3)}.png"),
+                    input,
+                    cmap="gray",
+                )
+                plt.imsave(
+                    str(save_root / "label" / f"{str(idx).zfill(3)}.png"),
+                    label,
+                    cmap="gray",
+                )
+
             ATy = ATy.to(self.device)
             mps_orig = mps_orig.to(self.device)
             """
@@ -242,16 +242,16 @@ class Diffusion(object):
             """
             # volume initialization
             x = torch.randn_like(x_orig)
-            skip = config.diffusion.num_diffusion_timesteps//args.T_sampling
+            skip = config.diffusion.num_diffusion_timesteps // args.T_sampling
             n = x.size(0)
             x0_preds = []
             xs = [x]
-            
+
             # generate time schedule
             times = range(0, 1000, skip)
             times_next = [-1] + list(times[:-1])
             times_pair = zip(reversed(times), reversed(times_next))
-            
+
             # reverse diffusion sampling
             for i, j in tqdm.tqdm(times_pair, total=len(times)):
                 """
@@ -261,7 +261,9 @@ class Diffusion(object):
                     t = (torch.ones(1) * i).to("cuda")
                     next_t = (torch.ones(1) * j).to("cuda")
                     t_mod = int((t // 20).item())
-                    if (self.args.end_t <= t <= self.args.start_t) and (t_mod % self.args.adapt_every_k == 0):   
+                    if (self.args.end_t <= t <= self.args.start_t) and (
+                        t_mod % self.args.adapt_every_k == 0
+                    ):
                         at = compute_alpha(self.betas, t.long())
                         at_next = compute_alpha(self.betas, next_t.long())
                         print(f"Running adaptation at {i} / 1000")
@@ -269,13 +271,29 @@ class Diffusion(object):
                         for _ in range(args.num_steps):
                             # Monte carlo sample a random slice
                             samp_idx = random.sample(range(n), self.args.num_mc)
-                            bcg = ATy[samp_idx, ...].view(self.args.num_mc, 1, img_size, img_size)
-                            y_idx = y[samp_idx, ...].view(self.args.num_mc, yc, yh, yw).to(self.device)
-                            xt = xs[-1][samp_idx, ...].to(self.device).view(self.args.num_mc, 1, img_size, img_size)
+                            bcg = ATy[samp_idx, ...].view(
+                                self.args.num_mc, 1, img_size, img_size
+                            )
+                            y_idx = (
+                                y[samp_idx, ...]
+                                .view(self.args.num_mc, yc, yh, yw)
+                                .to(self.device)
+                            )
+                            xt = (
+                                xs[-1][samp_idx, ...]
+                                .to(self.device)
+                                .view(self.args.num_mc, 1, img_size, img_size)
+                            )
                             # [1, 1, 240, 240] comp -> [1, 2, 240, 240] real
                             xt = comp_to_nchw_real(xt)
-                            mps_idx = mps_orig[samp_idx, ...].to(self.device).view(self.args.num_mc, c, img_size, img_size)
-                            Acg_idx = functools.partial(Acg, mps=mps_idx, gamma=self.args.gamma)
+                            mps_idx = (
+                                mps_orig[samp_idx, ...]
+                                .to(self.device)
+                                .view(self.args.num_mc, c, img_size, img_size)
+                            )
+                            Acg_idx = functools.partial(
+                                Acg, mps=mps_idx, gamma=self.args.gamma
+                            )
 
                             # Use the sampled xt for adaptation. Doesn't have to be the same for every iter.
                             optim.zero_grad()
@@ -283,7 +301,9 @@ class Diffusion(object):
                             x0_t = (xt - et * (1 - at).sqrt()) / at.sqrt()
                             # [1, 2, 240, 240] real -> [1, 1, 240, 240] comp
                             x0_t = real_to_nchw_comp(x0_t)
-                            Acg_idx = functools.partial(Acg, mps=mps_idx, gamma=self.args.gamma)
+                            Acg_idx = functools.partial(
+                                Acg, mps=mps_idx, gamma=self.args.gamma
+                            )
                             x0_t = CG(Acg_idx, bcg, x0_t, n_inner=1)
                             loss = adapt_loss_fn(A(x0_t, mps_idx), y_idx)
                             loss.backward()
@@ -297,7 +317,7 @@ class Diffusion(object):
                     next_t = (torch.ones(n) * j).to("cuda")
                     at = compute_alpha(self.betas, t.long())
                     at_next = compute_alpha(self.betas, next_t.long())
-                    xt = xs[-1].to('cuda')
+                    xt = xs[-1].to("cuda")
                     # [1, 1, 240, 240] comp -> [1, 2, 240, 240] real
                     xt = comp_to_nchw_real(xt)
                     xt_batch = batchfy(xt, batch_size)
@@ -315,47 +335,61 @@ class Diffusion(object):
                     x0_t = real_to_nchw_comp(x0_t)
                     # 2. Data consistency (CG)
                     bcg = x0_t + self.args.gamma * ATy
-                    Acg_idx = functools.partial(Acg, mps=mps_orig, gamma=self.args.gamma)
+                    Acg_idx = functools.partial(
+                        Acg, mps=mps_orig, gamma=self.args.gamma
+                    )
                     x0_t = CG(Acg_idx, bcg, x0_t, n_inner=5)
 
                     eta = self.args.eta
                     c1 = (1 - at_next).sqrt() * eta
-                    c2 = (1 - at_next).sqrt() * ((1 - eta ** 2) ** 0.5)
+                    c2 = (1 - at_next).sqrt() * ((1 - eta**2) ** 0.5)
                     # DDIM sampling
                     if j != 0:
                         # [1, 1, 240, 240] comp -> [1, 2, 240, 240] real
                         et = real_to_nchw_comp(et)
-                        xt_next = at_next.sqrt() * x0_t + c1 * torch.randn_like(x0_t) + c2 * et
+                        xt_next = (
+                            at_next.sqrt() * x0_t
+                            + c1 * torch.randn_like(x0_t)
+                            + c2 * et
+                        )
                     # Final step
                     else:
                         xt_next = x0_t
 
-                    x0_preds.append(x0_t.to('cpu'))
-                    xs.append(xt_next.to('cpu'))
+                    x0_preds.append(x0_t.to("cpu"))
+                    xs.append(xt_next.to("cpu"))
                 x = xs[-1]
-                
+
             cnt = 0
             psnr_avg = 0
             ssim_avg = 0
-            
+
             for idx in range(x.shape[0]):
                 recon = np.abs(clear(x[idx, ...]))
                 label = np.abs(clear(x_orig[idx, ...]))
-                plt.imsave(str(save_root / "recon" / f"{str(idx).zfill(3)}.png"), recon, cmap='gray')
-                plt.imsave(str(save_root / "label" / f"{str(idx).zfill(3)}.png"), label, cmap='gray')
-                
+                plt.imsave(
+                    str(save_root / "recon" / f"{str(idx).zfill(3)}.png"),
+                    recon,
+                    cmap="gray",
+                )
+                plt.imsave(
+                    str(save_root / "label" / f"{str(idx).zfill(3)}.png"),
+                    label,
+                    cmap="gray",
+                )
+
                 psnr = PSNR(recon, label)
                 ssim = SSIM(recon, label, data_range=recon.max())
-                
+
                 psnr_avg += psnr
                 ssim_avg += ssim
                 cnt += 1
-                
+
             summary = {}
             psnr_avg /= cnt
             ssim_avg /= cnt
             summary["results"] = {"PSNR": psnr_avg, "SSIM": ssim_avg}
-            with open(str(save_root / f"summary.json"), 'w') as f:
+            with open(str(save_root / f"summary.json"), "w") as f:
                 json.dump(summary, f)
 
 
